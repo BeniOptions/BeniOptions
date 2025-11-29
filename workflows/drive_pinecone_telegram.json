@@ -1,0 +1,377 @@
+{
+  "name": "Google Drive to Pinecone and Telegram QA",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerOn": "file",
+        "driveId": "myDrive",
+        "folder": "={{$env[\"GOOGLE_DRIVE_FOLDER_ID\"]}}",
+        "download": false
+      },
+      "id": "1",
+      "name": "Google Drive Trigger",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [-1200, 0]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": "={{$json[\"id\"]}}",
+        "options": {
+          "binaryProperty": "data"
+        }
+      },
+      "id": "2",
+      "name": "Download File",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [-980, 0],
+      "credentials": {
+        "googleApi": {
+          "id": "={{$env[\"N8N_GOOGLE_CRED_ID\"]}}",
+          "name": "Google API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {},
+        "setAllData": false,
+        "keepSource": false,
+        "binaryPropertyName": "data",
+        "dataPropertyName": "text",
+        "conversion": "binaryToText",
+        "encoding": "utf8"
+      },
+      "id": "3",
+      "name": "Binary → Text",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1,
+      "position": [-760, 0]
+    },
+    {
+      "parameters": {
+        "functionCode": "const text = $json.text || ''\nconst maxLen = 800\nconst chunks = text.match(new RegExp(`[^]{1,${maxLen}}`, 'g')) || []\nreturn chunks.map((chunk, idx) => ({ json: { chunk, metadata: { source: $json.name || $json.fileName || 'drive-file', index: idx } } }))\n"
+      },
+      "id": "4",
+      "name": "Chunk Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [-540, 0]
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "5",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [-320, 0]
+    },
+    {
+      "parameters": {
+        "operation": "createEmbedding",
+        "model": "text-embedding-3-small",
+        "text": "={{$json[\"chunk\"]}}"
+      },
+      "id": "6",
+      "name": "Embed Chunk",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 2,
+      "position": [-100, 0],
+      "credentials": {
+        "openAiApi": {
+          "id": "={{$env[\"N8N_OPENAI_CRED_ID\"]}}",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const embedding = $json.data[0].embedding\nconst meta = $json.metadata || {}\nreturn [{ json: { id: `${meta.source}-${meta.index}`, values: embedding, metadata: { text: $json.chunk, source: meta.source } } }]\n"
+      },
+      "id": "7",
+      "name": "Prepare Vector",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [120, 0]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "index": "={{$env[\"PINECONE_INDEX\"] || 'drive-index'}}",
+        "namespace": "drive-files",
+        "vectors": "={{[ { id: $json.id, values: $json.values, metadata: $json.metadata } ]}}"
+      },
+      "id": "8",
+      "name": "Pinecone Upsert",
+      "type": "n8n-nodes-base.pinecone",
+      "typeVersion": 1,
+      "position": [340, 0],
+      "credentials": {
+        "pineconeApi": {
+          "id": "={{$env[\"N8N_PINECONE_CRED_ID\"]}}",
+          "name": "Pinecone API"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "9",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [-1200, 400],
+      "credentials": {
+        "telegramApi": {
+          "id": "={{$env[\"N8N_TELEGRAM_CRED_ID\"]}}",
+          "name": "Telegram API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "createEmbedding",
+        "model": "text-embedding-3-small",
+        "text": "={{$json[\"message\"][\"text\"]}}"
+      },
+      "id": "10",
+      "name": "Embed Question",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 2,
+      "position": [-980, 400],
+      "credentials": {
+        "openAiApi": {
+          "id": "={{$env[\"N8N_OPENAI_CRED_ID\"]}}",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "query",
+        "index": "={{$env[\"PINECONE_INDEX\"] || 'drive-index'}}",
+        "namespace": "drive-files",
+        "topK": 5,
+        "vector": "={{$json.data[0].embedding}}"
+      },
+      "id": "11",
+      "name": "Pinecone Query",
+      "type": "n8n-nodes-base.pinecone",
+      "typeVersion": 1,
+      "position": [-760, 400],
+      "credentials": {
+        "pineconeApi": {
+          "id": "={{$env[\"N8N_PINECONE_CRED_ID\"]}}",
+          "name": "Pinecone API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const matches = $json.matches || []\nconst context = matches.map((m, idx) => `${idx+1}. ${m.metadata?.text || ''}`).join('\n')\nreturn [{ json: { prompt: `Usa el siguiente contexto para responder de forma concisa:\n${context}\n\nPregunta: ${$json.query || $json.message?.text || ''}` } }]
+"
+      },
+      "id": "12",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [-540, 400]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "messages": [
+          {
+            "role": "system",
+            "text": "Eres un asistente que responde basándote en el contexto proporcionado. Si no encuentras la respuesta en el contexto, indica que no está disponible."
+          },
+          {
+            "role": "user",
+            "text": "={{$json[\"prompt\"]}}"
+          }
+        ]
+      },
+      "id": "13",
+      "name": "Responder",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 2,
+      "position": [-320, 400],
+      "credentials": {
+        "openAiApi": {
+          "id": "={{$env[\"N8N_OPENAI_CRED_ID\"]}}",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json[\"message\"][\"chat\"][\"id\"]}}",
+        "text": "={{$json[\"data\"][0][\"message\"][\"content\"]}}"
+      },
+      "id": "14",
+      "name": "Enviar a Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [-100, 400],
+      "credentials": {
+        "telegramApi": {
+          "id": "={{$env[\"N8N_TELEGRAM_CRED_ID\"]}}",
+          "name": "Telegram API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Google Drive Trigger": {
+      "main": [
+        [
+          {
+            "node": "Download File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download File": {
+      "main": [
+        [
+          {
+            "node": "Binary → Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Binary → Text": {
+      "main": [
+        [
+          {
+            "node": "Chunk Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Text": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [
+          {
+            "node": "Embed Chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "next": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Chunk": {
+      "main": [
+        [
+          {
+            "node": "Prepare Vector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Vector": {
+      "main": [
+        [
+          {
+            "node": "Pinecone Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Embed Question",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Question": {
+      "main": [
+        [
+          {
+            "node": "Pinecone Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinecone Query": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Responder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder": {
+      "main": [
+        [
+          {
+            "node": "Enviar a Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "drive-pinecone-telegram-v1",
+  "id": "1"
+}
